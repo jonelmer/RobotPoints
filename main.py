@@ -3,7 +3,11 @@ import trimesh.path as path
 import trimesh.path.entities as entities
 import trimesh.visual as visual
 import trimesh.scene.scene as scene
+import trimesh.scene.viewer as viewer
 import trimesh.interfaces.scad as scad
+from trimesh.points import PointCloud
+import pyglet.window
+import pyglet.gl as gl
 from shapely.geometry import *
 from shapely.affinity import affine_transform
 import numpy as np
@@ -19,9 +23,78 @@ laser_height = 10
 laser_width = 10
 laser_focus = 40
 
+triad = path.Path3D(entities=[entities.Line([0, 1]),
+                              entities.Line([0, 2]),
+                              entities.Line([0, 3])],
+                    vertices=[[0, 0, 0], [10, 0, 0], [0, 10, 0], [0, 0, 10]])
+
+
 class PathGeneratorException(Exception):
     pass
 
+
+class ViewPort(viewer.SceneViewer):
+    def on_key_press(self, symbol, modifiers):
+        x = 0
+        y = 0
+
+        if symbol == pyglet.window.key.W:
+            self.toggle_wireframe()
+        elif symbol == pyglet.window.key.Z:
+            self.reset_view()
+        elif symbol == pyglet.window.key.C:
+            self.toggle_culling()
+        elif symbol == pyglet.window.key.ESCAPE:
+            self.reset_view()
+        elif symbol == pyglet.window.key.UP:
+            y = -1
+        elif symbol == pyglet.window.key.DOWN:
+            y = 1
+        elif symbol == pyglet.window.key.LEFT:
+            x = -1
+        elif symbol == pyglet.window.key.RIGHT:
+            x = 1
+
+    def on_mouse_motion(self, x, y, dx, dy):
+        print ("2D: ", x, y)
+        print ("3D: ", self.unproject(x, y))
+        self.select_ray(x, y)
+        self
+
+    def unproject(self, x, y):
+        x = 2 * (float(x) / self.width) - 1
+        y = 2 * (float(y) / self.height) - 1
+
+        tangent = np.tan(np.radians(60.) / 2)
+        aspect = self.width / self.height
+        dx = aspect * tangent * x
+        dy = tangent * y
+        dz = -1.0
+        point = np.array([dx, dy, dz])
+        return point / np.linalg.norm(point)
+
+    def select_ray(self, x, y):
+        transform = np.reshape(np.matrix(viewer._view_transform(self.view)), (4, 4))
+
+        scale = np.eye(4) * self.view['scale']
+        scale[3, 3] = 1
+
+        center = np.eye(4)
+        center[0:3, 3] = self.view['center']
+
+        print transform
+        transform *= center
+        transform *= scale
+
+        center[0:3, 3] = center[0:3, 3] * -1
+
+        transform *= center
+
+        print transform.I
+        point = (transform.I * np.matrix([x, y, 0, 1]).T).T.tolist()
+        print ("Point at: ", point[0][0:3])
+
+        self.add_geometry("mouse", PointCloud(vertices=[point[0][0:3]]))
 
 def laser_profile(vertices):
     profile = []
@@ -50,11 +123,9 @@ def laser_profile(vertices):
         mesh_faces.append((0, q, p))
 
     mesh_faces = [(0, 2, 1), (0, 3, 2), (0, 4, 3), (0, 1, 4), (1, 2, 3), (1, 3, 4)]
-    #mesh_faces = [mesh_faces[0], mesh_faces[3]]
+    # mesh_faces = [mesh_faces[0], mesh_faces[3]]
 
     return np.sum(profile), trimesh.Trimesh(vertices=mesh_vertices, faces=mesh_faces)
-
-
 
 
 def next_point(path, index, last_point, distance):
@@ -74,10 +145,10 @@ def next_point(path, index, last_point, distance):
             print('Distance to intersection is ', last.distance(intersection))
 
             if type(intersection) is Point:
-                return intersection, i+index
+                return intersection, i + index
             else:
                 if len(intersection) is 0:
-                    return Point(search.coords[i]), i+index
+                    return Point(search.coords[i]), i + index
                 raise PathGeneratorException('Intersection is not a point! %s' % (intersection))
 
     raise PathGeneratorException('No point is at specified distance from start')
@@ -86,12 +157,12 @@ def next_point(path, index, last_point, distance):
 if __name__ == '__main__' or __name__ == '__builtin__':
     mesh = trimesh.load(mesh_file)
     mesh.apply_transform(trimesh.transformations.scale_matrix(2))
-    #mesh.apply_transform(trimesh.transformations.rotation_matrix(-np.pi/2, [0, 1, 0])
+    # mesh.apply_transform(trimesh.transformations.rotation_matrix(-np.pi/2, [0, 1, 0])
 
     print('Object has extents ', mesh.bounds)
 
     z_extents = mesh.bounds[:, 2]
-    #z_extents[0] = z_extents[0] + laser_height/2
+    # z_extents[0] = z_extents[0] + laser_height/2
     z_levels = np.arange(*z_extents, step=laser_height)
 
     sections = [None] * len(z_levels)
@@ -99,14 +170,13 @@ if __name__ == '__main__' or __name__ == '__builtin__':
     for i, z in enumerate(z_levels):
         sections[i] = mesh.section(plane_origin=[0, 0, z], plane_normal=[0, 0, 1])
 
-    mesh.visual = visual.create_visual(face_colors=[(0.2, 0.2, 1, 0.5)]*len(mesh.faces))
+    mesh.visual = visual.create_visual(face_colors=[(0.2, 0.2, 1, 0.5)] * len(mesh.faces))
 
     sc = scene.Scene()
-    #sc.add_geometry(sections[-1])
     sc.add_geometry(np.sum(sections))
     sc.add_geometry(mesh)
 
-    sc.show()
+    #sc.show()
 
     fig = plt.figure()
     ax = Axes3D(fig)
@@ -128,7 +198,7 @@ if __name__ == '__main__' or __name__ == '__builtin__':
         ring = LinearRing(poly.exterior)
         ring = affine_transform(ring, [1, 0, 0, 1, transform[0][-1], transform[1][-1]])
 
-        #ring = LinearRing(poly.convex_hull.exterior)
+        # ring = LinearRing(poly.convex_hull.exterior)
         if not ring.is_ccw:
             ring.coords = list(ring.coords)[::-1]
 
@@ -165,7 +235,7 @@ if __name__ == '__main__' or __name__ == '__builtin__':
                     print('That\'s a wrap!')
                     break
 
-        #for i in range(len(points)):
+        # for i in range(len(points)):
         #    points[i] = (points[i][0] + transform[0][-1], points[i][1] + transform[1][-1])
 
         section_points[i] = points
@@ -175,10 +245,10 @@ if __name__ == '__main__' or __name__ == '__builtin__':
         px, py = zip(*points)
         ax.plot(px, py, z, 'bx')
         plt.axis('equal')
-        #plt.show()
+        # plt.show()
 
         if __name__ == '__builtin__':
-            #raw_input()
+            # raw_input()
             pass
 
     print section_points
@@ -191,25 +261,25 @@ if __name__ == '__main__' or __name__ == '__builtin__':
         if section_points[i] is None:
             continue
 
-        for j in range(len(section_points[i])-1):
+        for j in range(len(section_points[i]) - 1):
             try:
                 a = section_points[i][j] + (z_levels[i],)
-                #b = section_points[i+1][j] + (z_levels[i+1],)
-                #c = section_points[i+1][j+1] + (z_levels[i+1],)
-                b = section_points[i][j] + (z_levels[i]+laser_height,)
-                c = section_points[i][j+1] + (z_levels[i]+laser_height,)
-                d = section_points[i][j+1] + (z_levels[i],)
+                # b = section_points[i+1][j] + (z_levels[i+1],)
+                # c = section_points[i+1][j+1] + (z_levels[i+1],)
+                b = section_points[i][j] + (z_levels[i] + laser_height,)
+                c = section_points[i][j + 1] + (z_levels[i] + laser_height,)
+                d = section_points[i][j + 1] + (z_levels[i],)
             except (IndexError, TypeError):
                 break
 
             x, y, z = zip(a, b, c, d, a)
 
-            #ax.plot(x, y, z, 'k-')
+            # ax.plot(x, y, z, 'k-')
 
-            #sq = art3d.Poly3DCollection([zip(x, y, z)])
-            #sq.set_color((0.5, 0.5, 0.5, 0.1))
-            #sq.set_edgecolor('w')
-            #ax.add_collection3d(sq)
+            # sq = art3d.Poly3DCollection([zip(x, y, z)])
+            # sq.set_color((0.5, 0.5, 0.5, 0.1))
+            # sq.set_edgecolor('w')
+            # ax.add_collection3d(sq)
 
             squares.append(trimesh.path.Path3D([entities.Line((0, 1)),
                                                 entities.Line((1, 2)),
@@ -218,37 +288,38 @@ if __name__ == '__main__' or __name__ == '__builtin__':
 
             l = len(triangle_vertices)
             triangle_vertices.extend([a, b, c, d])
-            triangle_faces.extend([(l+0, l+2, l+1), (l+0, l+3, l+2)])
+            triangle_faces.extend([(l + 0, l + 2, l + 1), (l + 0, l + 3, l + 2)])
 
-    #for face in mesh.faces:
-        #vertices = [list(mesh.vertices[f]) for f in face]
-        #tri = art3d.Poly3DCollection([vertices])
-        #tri.set_color((0.2, 0.2, 0.6, 0.1))
-        #tri.set_edgecolor((0.2, 0.2, 0.6))
-        #ax.add_collection3d(tri)
+            # for face in mesh.faces:
+            # vertices = [list(mesh.vertices[f]) for f in face]
+            # tri = art3d.Poly3DCollection([vertices])
+            # tri.set_color((0.2, 0.2, 0.6, 0.1))
+            # tri.set_edgecolor((0.2, 0.2, 0.6))
+            # ax.add_collection3d(tri)
 
-    #plt.show()
+    # plt.show()
 
     sc = scene.Scene()
     sc.add_geometry(np.sum(squares))
     sc.add_geometry(mesh)
 
     new_mesh = trimesh.Trimesh(vertices=triangle_vertices, faces=triangle_faces,
-                               face_colors=[(1, 0.2, 0.2, 0.5)]*len(triangle_faces))
+                               face_colors=[(1, 0.2, 0.2, 0.5)] * len(triangle_faces))
     sc.add_geometry(new_mesh)
 
     laser_outline, laser_mesh = laser_profile(squares[0].discrete[0])
 
-    laser_mesh.visual = visual.create_visual(face_colors=[(0.2, 1, 0.2, 0.2)]*len(mesh.faces))
+    laser_mesh.visual = visual.create_visual(face_colors=[(0.2, 1, 0.2, 0.2)] * len(mesh.faces))
 
     sc.add_geometry(laser_mesh)
 
-    sc.show()
+    sc.add_geometry(triad)
+
+    #sc.show()
+
+    ViewPort(sc)
 
     intersection = trimesh.Trimesh(**scad.boolean([mesh, laser_mesh], 'intersection'))
     intersection.show()
 
     raw_input()
-
-
-
