@@ -5,9 +5,10 @@ import trimesh.visual as visual
 import trimesh.scene.scene as scene
 import trimesh.scene.viewer as viewer
 import trimesh.interfaces.scad as scad
+from trimesh.ray.ray_triangle import RayMeshIntersector
 from trimesh.points import PointCloud
 import pyglet.window
-import pyglet.gl as gl
+from pyglet.gl import *
 from shapely.geometry import *
 from shapely.affinity import affine_transform
 import numpy as np
@@ -55,46 +56,6 @@ class ViewPort(viewer.SceneViewer):
         elif symbol == pyglet.window.key.RIGHT:
             x = 1
 
-    def on_mouse_motion(self, x, y, dx, dy):
-        print ("2D: ", x, y)
-        print ("3D: ", self.unproject(x, y))
-        self.select_ray(x, y)
-        self
-
-    def unproject(self, x, y):
-        x = 2 * (float(x) / self.width) - 1
-        y = 2 * (float(y) / self.height) - 1
-
-        tangent = np.tan(np.radians(60.) / 2)
-        aspect = self.width / self.height
-        dx = aspect * tangent * x
-        dy = tangent * y
-        dz = -1.0
-        point = np.array([dx, dy, dz])
-        return point / np.linalg.norm(point)
-
-    def select_ray(self, x, y):
-        transform = np.reshape(np.matrix(viewer._view_transform(self.view)), (4, 4))
-
-        scale = np.eye(4) * self.view['scale']
-        scale[3, 3] = 1
-
-        center = np.eye(4)
-        center[0:3, 3] = self.view['center']
-
-        print transform
-        transform *= center
-        transform *= scale
-
-        center[0:3, 3] = center[0:3, 3] * -1
-
-        transform *= center
-
-        print transform.I
-        point = (transform.I * np.matrix([x, y, 0, 1]).T).T.tolist()
-        print ("Point at: ", point[0][0:3])
-
-        self.add_geometry("mouse", PointCloud(vertices=[point[0][0:3]]))
 
 def laser_profile(vertices):
     profile = []
@@ -102,12 +63,7 @@ def laser_profile(vertices):
     mesh_faces = []
     vertices = np.array(vertices)
 
-    a = vertices[3] - vertices[0]
-    b = vertices[2] - vertices[0]
-    c = sum(vertices) / len(vertices)
-
-    normal = np.cross(a, b)
-    focus = (normal / np.linalg.norm(normal) * laser_focus) + c
+    focus = focal_point(vertices)
 
     mesh_vertices.append(focus)
 
@@ -126,6 +82,40 @@ def laser_profile(vertices):
     # mesh_faces = [mesh_faces[0], mesh_faces[3]]
 
     return np.sum(profile), trimesh.Trimesh(vertices=mesh_vertices, faces=mesh_faces)
+
+
+def focal_point(vertices):
+    vertices = np.array(vertices)
+
+    print vertices
+
+    a = vertices[2] - vertices[0]
+    b = vertices[1] - vertices[0]
+    c = sum(vertices) / len(vertices)
+
+    normal = np.cross(a, b)
+    focus = (normal / np.linalg.norm(normal) * laser_focus) + c
+
+    return focus
+
+
+def profile_patch(points, focus, intersector):
+    distances = [None] * len(points)
+
+    directions = [point - focus for point in points]
+
+    location, index = intersector.intersects_location([focus] * len(points), directions)
+
+    for l, i in zip(location, index):
+        line = LineString([points[i], focus])
+        d = line.project(Point(l))
+        print i, l, d
+        if distances[i] is None:
+            distances[i] = d
+        if d > distances[i]:
+            distances[i] = d
+
+    return distances
 
 
 def next_point(path, index, last_point, distance):
@@ -176,7 +166,7 @@ if __name__ == '__main__' or __name__ == '__builtin__':
     sc.add_geometry(np.sum(sections))
     sc.add_geometry(mesh)
 
-    #sc.show()
+    # sc.show()
 
     fig = plt.figure()
     ax = Axes3D(fig)
@@ -315,9 +305,58 @@ if __name__ == '__main__' or __name__ == '__builtin__':
 
     sc.add_geometry(triad)
 
-    #sc.show()
+    sc.show()
 
-    ViewPort(sc)
+    # ViewPort(sc)
+
+    grid = [[[i, 0, j] for i in range(laser_width)] for j in range(laser_height)]
+    grid = np.reshape(grid, (-1, 3))
+    grid = grid + [0.5, 0, 0.5]
+    # undo with (laser_height, laser_width, 3)
+
+    intersector = RayMeshIntersector(mesh)
+
+    for points, z in zip(section_points, z_levels):
+        points = [list(p) + [z] for p, z in zip(points, z_levels)]
+
+        for i in range(len(points) - 1):
+            # laser_outline, laser_mesh = laser_profile(squares[i].discrete[0])
+
+            # focus = laser_mesh.vertices[0]
+
+            print("origin at ", points[i])
+
+            up = points[i][:]
+            up[2] = laser_height
+
+            focus = focal_point([points[i], points[i + 1], up])
+            print focus
+
+            origin = points[i]
+            direction = [a - b for a, b in zip(points[i + 1], points[i])]
+
+            angle = np.arctan(direction[1] / direction[0])
+
+            transform = np.eye(3)
+            transform[0:2, 0:2] = [[np.cos(angle), np.sin(angle)], [-np.sin(angle), np.cos(angle)]]
+
+            sample = [np.dot(transform, g.T) for g in grid]
+
+            # print sample
+
+            profile = profile_patch(sample, focus, intersector)
+            plt.plot(profile, range(len(profile)))
+
+            x, y, z = zip(*grid)
+
+            intensity = np.reshape(profile, (laser_height, laser_width))
+
+            plt.pcolormesh(np.reshape(x, (laser_height, -1)), np.reshape(z, (laser_height, -1)), intensity)
+            plt.colorbar()
+
+
+            break
+        break
 
     intersection = trimesh.Trimesh(**scad.boolean([mesh, laser_mesh], 'intersection'))
     intersection.show()
