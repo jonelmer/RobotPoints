@@ -57,19 +57,20 @@ class Laser(object):
                           (3, 0, 7), (4, 7, 0),
                           (0, 2, 1), (0, 3, 2),
                           (4, 5, 6), (4, 6, 7)]
-
-        return trimesh.Trimesh(vertices=mesh_vertices, faces=mesh_faces)
+        mesh = trimesh.Trimesh(vertices=mesh_vertices, faces=mesh_faces)
+        set_mesh_color(mesh, (0., 1., 0., 0.5))
+        return mesh
 
     def get_nominal_3D(self, target):
         return trimesh.path.Path3D([trimesh.path.entities.Line((0, 1))],
-                                   [target['point'], self.get_focus(target)])
+                                   [target.point, self.get_focus(target)])
 
     def get_focus(self, target):
-        return target['point'] + target['normal']*self.focus_distance
+        return target.point + target.normal*self.focus_distance
 
     def get_image_vertices(self, target):
         # Only consider normals which are in the x-y plane
-        if not target['normal'][2] == 0.:
+        if not target.normal[2] == 0.:
             raise LaserException("Expected the z-normal to be zero, but got {}".format(target['normal'][2]))
 
         # Rotate about the z axis to get the rightwards vector
@@ -77,7 +78,7 @@ class Laser(object):
             [0., -1., 0.],
             [1.,  0., 0.],
             [0.,  0., 1.]],
-            target['normal'])
+            target.normal)
         right *= self.width/2
 
         # Up must be +Z
@@ -85,12 +86,18 @@ class Laser(object):
 
         vertices = [None] * 4
 
-        vertices[0] = target['point'] - right - up
-        vertices[1] = target['point'] - right + up
-        vertices[2] = target['point'] + right + up
-        vertices[3] = target['point'] + right - up
+        vertices[0] = target.point - right - up
+        vertices[1] = target.point - right + up
+        vertices[2] = target.point + right + up
+        vertices[3] = target.point + right - up
 
         return vertices
+
+
+class Target(object):
+    def __init__(self, point, normal):
+        self.point = point
+        self.normal = normal
 
 
 class PathFinder(object):
@@ -103,6 +110,7 @@ class PathFinder(object):
         self.layers = None
         self.sections = None
         self.section_points = None
+        self.targets = None
 
         if process:
             self.process()
@@ -111,6 +119,7 @@ class PathFinder(object):
         self._layers()
         self._sections()
         self._points()
+        self._targets()
 
     def _layers(self):
         if self.mode is 'mid':
@@ -207,91 +216,101 @@ class PathFinder(object):
 
         self.section_points = section_points
 
+    def _targets(self):
+        self.targets = [[None]] * len(self.section_points)
+
+        with tqdm(total=sum([len(s)-1 for s in self.section_points]), desc="Targets...") as pbar:
+            for i, section_points in enumerate(self.section_points):
+                self.targets[i] = []
+
+                for a, b in zip(section_points, section_points[1:]):
+                    a = np.array(a)
+                    b = np.array(b)
+
+                    point = (a + b) / 2.
+
+                    if self.mode is 'base':
+                        point[2] += self.laser.height / 2
+
+                    normal = np.cross(a - b, [0, 0, 1])
+                    normal /= np.linalg.norm(normal)
+
+                    self.targets[i].append(Target(point, normal))
+                    pbar.update()
+
     def get_pointcloud(self):
         if self.section_points is not None:
             return trimesh.points.PointCloud(np.sum(self.section_points))
 
     def get_squares(self):
-        squares = [[None]] * len(self.section_points)
+        squares = [[None]] * len(self.targets)
 
-        for i, section_points in enumerate(self.section_points):
+        for i, target in enumerate(self.targets):
 
             # Clear the current section's list of squares
             squares[i] = []
 
-            for a, b in zip(section_points, section_points[1:]):
-                square = []
-                if self.mode is 'mid':
-                    square.append(a[:2]+[a[2]-self.laser.height/2])
-                    square.append(a[:2]+[a[2]+self.laser.height/2])
-                    square.append(b[:2]+[b[2]+self.laser.height/2])
-                    square.append(b[:2]+[b[2]-self.laser.height/2])
-                else:
-                    square.append(a)
-                    square.append(a[:2] + [a[2] + self.laser.height])
-                    square.append(b[:2] + [b[2] + self.laser.height])
-                    square.append(b)
-
-                squares[i].append(square)
+            for t in target:
+                squares[i].append(self.laser.get_image_vertices(t))
 
         return squares
 
 
 class PathAssessor(object):
-    def __init__(self, laser, mesh):
-        self.laser = laser
-        self.mesh = mesh
+    def __init__(self, path, resolution=10, process=True):
+        self.path = path
+        self.laser = self.path.laser
+        self.mesh = self.path.mesh
+        self.resolution = resolution
         self.intersector = trimesh.ray.ray_triangle.RayMeshIntersector(self.mesh)
 
-    def process_layers(self, layers, steps):
-        #print "Assessing {} layers".format(len(squares))
+        self.data = None
 
-        pbar = tqdm(total=sum([len(l) for l in layers]), desc="Assessing... ")
+        if process:
+            self.process()
 
-        layer_distances = [self.process_squares(layer, steps, pbar=pbar) for layer in layers]
+    def process(self):
+        pbar = tqdm(total=sum([len(t) for t in self.path.targets]), desc="Assessing... ")
+
+        layer_distances = [self.process_targets(targets, pbar=pbar) for targets in self.path.targets]
 
         pbar.close()
 
-        data = layer_distances[0]
+        self.data = layer_distances[0]
         for layer in layer_distances[1:]:
-            data += layer
+            self.data += layer
 
-        return data#layer_distances#zip(*layer_distances)
+        return self.data
 
+    def process_targets(self, targets, pbar=None):
+        distances = [None] * len(targets)
 
-    def process_squares(self, squares, steps, pbar=None):
-        distances = [None] * len(squares)
-
-        for i, square in enumerate(squares):
-            distances[i] = self.process_square(square, steps, pbar)
+        for i, target in enumerate(targets):
+            distances[i] = self.process_target(target, pbar)
 
         return stitch_arrays(distances)
 
-
-    def process_square(self, square, steps, pbar):
-        target = vertices_to_target(square)
+    def process_target(self, target, pbar):
         focus = self.laser.get_focus(target)
-        grid = self.interpolate_grid(target, steps)
+        grid = self.interpolate_grid(target)
         distances = [self.distance(point, focus) for point in grid]
-
-        #data = [g + [d] for g, d in zip(grid, distances)]
 
         if pbar:
             pbar.update()
 
-        return np.reshape(distances, (steps, steps))
+        return np.reshape(distances, (self.resolution, self.resolution))
 
-    def interpolate_grid(self, target, steps):
+    def interpolate_grid(self, target):
         image = self.laser.get_image_vertices(target)
-        x = np.linspace(image[2][0], image[0][0], steps+1)
+        x = np.linspace(image[0][0], image[2][0], self.resolution+1)
         x += (x[1] - x[0])/2
         x = x[:-1]
 
-        y = np.linspace(image[2][1], image[0][1], steps+1)
+        y = np.linspace(image[0][1], image[2][1], self.resolution+1)
         y += (y[1] - y[0]) / 2
         y = y[:-1]
 
-        z = np.linspace(image[0][2], image[2][2], steps+1)
+        z = np.linspace(image[0][2], image[2][2], self.resolution+1)
         z += (z[1] - z[0]) / 2
         z = z[:-1]
 
@@ -332,7 +351,7 @@ def vertices_to_target(vertices):
     target_normal = np.cross(a, b)
     target_normal = target_normal / np.linalg.norm(target_normal)
 
-    return {'point': target_point, 'normal': target_normal}
+    return Target(target_point, target_normal)
 
 
 def vertices_to_3D(vertices, closed=True):
@@ -421,12 +440,12 @@ def cylinder():
     squares = path.get_squares()
 
     res = 10
-    ass = PathAssessor(laser, mesh)
+    ass = PathAssessor(path, res)
 
     scene = mesh.scene()
     scene.add_geometry(squares_to_3D(squares))
 
-    data = equalize_and_mask(ass.process_layers(squares, res))
+    data = equalize_and_mask(ass.data)
     plot_colour_map(data, res)
 
     set_mesh_color(mesh)
@@ -443,12 +462,12 @@ def cube():
     squares = path.get_squares()
 
     res = 10
-    ass = PathAssessor(laser, mesh)
+    ass = PathAssessor(path, res)
 
     scene = mesh.scene()
     scene.add_geometry(squares_to_3D(squares))
 
-    data = equalize_and_mask(ass.process_layers(squares, res))
+    data = equalize_and_mask(ass.data)
     plot_colour_map(data, res)
 
     set_mesh_color(mesh)
@@ -468,6 +487,7 @@ def shuttle():
     path.layers = path.layers[1:20]
     path._sections()
     path._points()
+    path._targets()
 
     squares = path.get_squares()
 
@@ -477,9 +497,9 @@ def shuttle():
     scene.add_geometry(squares_to_3D(squares))
 
     res = 10
-    ass = PathAssessor(laser, mesh)
+    ass = PathAssessor(path, res)
 
-    data = equalize_and_mask(ass.process_layers(squares, res))
+    data = equalize_and_mask(ass.data)
     plot_colour_map(data, res)
 
     set_mesh_color(mesh)
@@ -495,12 +515,12 @@ if __name__ == "__main__" or __name__ == "__builtin__":
     squares = path.get_squares()
 
     res = 10
-    ass = PathAssessor(laser, mesh)
+    ass = PathAssessor(path, res)
 
     scene = mesh.scene()
     scene.add_geometry(squares_to_3D(squares))
 
-    data = equalize_and_mask(ass.process_layers(squares, res))
+    data = equalize_and_mask(ass.data)
     plot_colour_map(data, res)
 
     set_mesh_color(mesh)
