@@ -147,7 +147,7 @@ def next_point(path, index, last_point, distance):
 if __name__ == '__main__' or __name__ == '__builtin__':
     mesh = trimesh.load(mesh_file)
     mesh.apply_transform(trimesh.transformations.scale_matrix(2))
-    # mesh.apply_transform(trimesh.transformations.rotation_matrix(-np.pi/2, [0, 1, 0])
+    # mesh.apply_transform(trimesh.transformations.rotation_matrix(-np.pi/2, [0, 1, 0]))
 
     print('Object has extents ', mesh.bounds)
 
