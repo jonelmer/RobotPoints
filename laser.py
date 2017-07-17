@@ -94,9 +94,11 @@ class Laser(object):
 
 
 class PathFinder(object):
-    def __init__(self, laser, mesh, process=True):
+    def __init__(self, laser, mesh, process=True, mode='mid'):
         self.laser = laser
         self.mesh = mesh
+
+        self.mode = mode
 
         self.layers = None
         self.sections = None
@@ -111,12 +113,19 @@ class PathFinder(object):
         self._points()
 
     def _layers(self):
-        self.layers = np.arange(*self.mesh.bounds[:, 2], step=self.laser.height)
+        if self.mode is 'mid':
+            bounds = self.mesh.bounds[:, 2]
+            bounds[0] += self.laser.height/2
+            self.layers = np.arange(*bounds, step=self.laser.height)
+        else:
+            self.layers = np.arange(*self.mesh.bounds[:, 2], step=self.laser.height)
 
     def _sections(self):
         sections = [None] * len(self.layers)
-        for i, z in tqdm(enumerate(self.layers), desc="Sectioning mesh..."):
+        pbar = tqdm(total=len(self.layers), desc="Sectioning mesh...")
+        for i, z in enumerate(self.layers):
             sections[i] = self.mesh.section(plane_origin=[0., 0., z], plane_normal=[0., 0., 1.])
+            pbar.update()
         self.sections = sections
 
     def _points(self):
@@ -131,14 +140,14 @@ class PathFinder(object):
                 d = shapely.geometry.Point(p).distance(last)
                 if d > distance:
                     d_s = last.distance(shapely.geometry.Point(search.coords[i - 1]))
-                    print('Distance to previous path point is ', d_s)
-                    print('Distance to next path point is ', d)
+                    #print('Distance to previous path point is ', d_s)
+                    #print('Distance to next path point is ', d)
                     line = shapely.geometry.LineString([search.coords[i - 1], search.coords[i]])
 
                     intersection = shapely.geometry.\
                         LinearRing(last.buffer(self.laser.width).exterior.coords).intersection(line)
 
-                    print('Distance to intersection is ', last.distance(intersection))
+                    #print('Distance to intersection is ', last.distance(intersection))
 
                     if type(intersection) is shapely.geometry.Point:
                         return intersection, i + index
@@ -183,14 +192,14 @@ class PathFinder(object):
 
                     intersection = list(intersection.coords)[0]
 
-                    print('Next intersection at', intersection)
+                    #print('Next intersection at', intersection)
 
                     points.append(intersection)
 
                     if start_point.distance(shapely.geometry.Point(intersection)) < self.laser.width:
-                        print('Close to start point')
+                        #print('Close to start point')
                         if len(points) > 2:
-                            print('That\'s a wrap!')
+                            #print('That\'s a wrap!')
                             break
 
                 section_points[i] = [list(p) + [z] for p in points]
@@ -212,10 +221,16 @@ class PathFinder(object):
 
             for a, b in zip(section_points, section_points[1:]):
                 square = []
-                square.append(a)
-                square.append(a[:2]+[a[2]+self.laser.height])
-                square.append(b[:2]+[b[2]+self.laser.height])
-                square.append(b)
+                if self.mode is 'mid':
+                    square.append(a[:2]+[a[2]-self.laser.height/2])
+                    square.append(a[:2]+[a[2]+self.laser.height/2])
+                    square.append(b[:2]+[b[2]+self.laser.height/2])
+                    square.append(b[:2]+[b[2]-self.laser.height/2])
+                else:
+                    square.append(a)
+                    square.append(a[:2] + [a[2] + self.laser.height])
+                    square.append(b[:2] + [b[2] + self.laser.height])
+                    square.append(b)
 
                 squares[i].append(square)
 
@@ -229,7 +244,7 @@ class PathAssessor(object):
         self.intersector = trimesh.ray.ray_triangle.RayMeshIntersector(self.mesh)
 
     def process_layers(self, layers, steps):
-        print "Assessing {} layers".format(len(squares))
+        #print "Assessing {} layers".format(len(squares))
 
         pbar = tqdm(total=sum([len(l) for l in layers]), desc="Assessing... ")
 
